@@ -28,6 +28,7 @@ import com.hazelcast.spi.*;
 import com.hazelcast.spi.exception.DistributedObjectDestroyedException;
 import com.hazelcast.util.ConcurrencyUtil;
 import com.hazelcast.util.ConstructorFunction;
+import com.hazelcast.util.executor.StripedRunnable;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -166,19 +167,16 @@ public class ProxyServiceImpl implements ProxyService, EventPublishingService<Di
     public void dispatchEvent(final DistributedObjectEvent event, Object ignore) {
         final String serviceName = event.getServiceName();
         if (event.getEventType() == CREATED) {
-            final ProxyRegistry registry = ConcurrencyUtil.getOrPutIfAbsent(registries, serviceName, registryConstructor);
-            nodeEngine.getExecutionService().execute(ExecutionService.SYSTEM_EXECUTOR, new Runnable() {
-                public void run() {
-                    try {
-                        registry.getProxy(event.getObjectId());
-                    } catch (HazelcastInstanceNotActiveException ignored) {}
-                }
-            });
+            try {
+                final ProxyRegistry registry = ConcurrencyUtil.getOrPutIfAbsent(registries, serviceName, registryConstructor);
+                registry.getProxy(event.getObjectId());
 
-            if (!registry.contains(event.getObjectId())) {
-                for (DistributedObjectListener listener : listeners.values()) {
-                    listener.distributedObjectCreated(event);
+                if (!registry.contains(event.getObjectId())) {
+                    for (DistributedObjectListener listener : listeners.values()) {
+                        listener.distributedObjectCreated(event);
+                    }
                 }
+            } catch (HazelcastInstanceNotActiveException ignored) {
             }
         } else {
             final ProxyRegistry registry = registries.get(serviceName);
@@ -209,7 +207,7 @@ public class ProxyServiceImpl implements ProxyService, EventPublishingService<Di
             }
         }
 
-        DistributedObject getProxy(Object objectId) {
+        DistributedObject getProxy(final Object objectId) {
             DistributedObject proxy = proxies.get(objectId);
             if (proxy == null) {
                 if (!nodeEngine.isActive()) {
@@ -220,11 +218,14 @@ public class ProxyServiceImpl implements ProxyService, EventPublishingService<Di
                 if (current == null) {
                     final DistributedObjectEvent event = createEvent(objectId, CREATED);
                     publish(event);
-                    nodeEngine.eventService.executeEvent(new Runnable() {
+                    nodeEngine.eventService.executeEvent(new StripedRunnable() {
                         public void run() {
                             for (DistributedObjectListener listener : listeners.values()) {
                                 listener.distributedObjectCreated(event);
                             }
+                        }
+                        public int getKey() {
+                            return objectId.hashCode();
                         }
                     });
                 } else {
@@ -248,7 +249,7 @@ public class ProxyServiceImpl implements ProxyService, EventPublishingService<Di
         private void publish(DistributedObjectEvent event) {
             final EventService eventService = nodeEngine.getEventService();
             final Collection<EventRegistration> registrations = eventService.getRegistrations(SERVICE_NAME, SERVICE_NAME);
-            eventService.publishEvent(SERVICE_NAME, registrations, event);
+            eventService.publishEvent(SERVICE_NAME, registrations, event, event.getObjectId().hashCode());
         }
 
         private DistributedObjectEvent createEvent(Object objectId, DistributedObjectEventImpl.EventType type) {

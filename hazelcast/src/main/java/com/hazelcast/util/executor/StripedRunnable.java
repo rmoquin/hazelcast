@@ -14,31 +14,13 @@
  * limitations under the License.
  */
 
-package com.hazelcast.core;
+package com.hazelcast.util.executor;
 
 /**
- * Type of item event.
+ * @mdogan 6/11/13
  */
-public enum ItemEventType {
-    ADDED(1),
-    REMOVED(2);
+public interface StripedRunnable extends Runnable {
 
-    private int type;
+    int getKey();
 
-    private ItemEventType(final int type) {
-        this.type = type;
-    }
-
-    public int getType() {
-        return type;
-    }
-
-    public static ItemEventType getByType(final int eventType) {
-        for (ItemEventType entryEventType : values()) {
-            if (entryEventType.type == eventType) {
-                return entryEventType;
-            }
-        }
-        return null;
-    }
 }

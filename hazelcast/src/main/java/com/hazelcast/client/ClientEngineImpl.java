@@ -18,9 +18,7 @@ package com.hazelcast.client;
 
 import com.hazelcast.cluster.ClusterService;
 import com.hazelcast.config.Config;
-import com.hazelcast.core.Client;
-import com.hazelcast.core.ClientListener;
-import com.hazelcast.core.ClientService;
+import com.hazelcast.core.*;
 import com.hazelcast.instance.MemberImpl;
 import com.hazelcast.instance.Node;
 import com.hazelcast.logging.ILogger;
@@ -166,13 +164,14 @@ public class ClientEngineImpl implements ClientEngine, ConnectionListener, CoreS
         }
     };
 
-    ClientEndpoint getEndpoint(String uuid) {
+    Set<ClientEndpoint> getEndpoints(String uuid) {
+        Set<ClientEndpoint> endpointSet = new HashSet<ClientEndpoint>();
         for (ClientEndpoint endpoint : endpoints.values()) {
             if (uuid.equals(endpoint.getUuid())) {
-                return endpoint;
+                endpointSet.add(endpoint);
             }
         }
-        return null;
+        return endpointSet;
     }
 
     ClientEndpoint getEndpoint(Connection conn) {
@@ -267,7 +266,7 @@ public class ClientEngineImpl implements ClientEngine, ConnectionListener, CoreS
     private void sendClientEvent(ClientEndpoint endpoint) {
         final EventService eventService = nodeEngine.getEventService();
         final Collection<EventRegistration> regs = eventService.getRegistrations(SERVICE_NAME, SERVICE_NAME);
-        eventService.publishEvent(SERVICE_NAME, regs, endpoint);
+        eventService.publishEvent(SERVICE_NAME, regs, endpoint, endpoint.getUuid().hashCode());
     }
 
     public void dispatchEvent(ClientEndpoint event, ClientListener listener) {
@@ -336,7 +335,10 @@ public class ClientEngineImpl implements ClientEngine, ConnectionListener, CoreS
                     if (serviceName != null) {
                         final Object service = nodeEngine.getService(serviceName);
                         if (service == null) {
-                            throw new IllegalArgumentException("No service registered with name: " + serviceName);
+                            if (nodeEngine.isActive()) {
+                                throw new IllegalArgumentException("No service registered with name: " + serviceName);
+                            }
+                            throw new HazelcastInstanceNotActiveException();
                         }
                         request.setService(service);
                         if (request instanceof InitializingRequest) {

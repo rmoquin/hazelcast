@@ -60,7 +60,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 
-
+/**
+ * @author enesakar 1/17/13
+ */
 public class MapService implements ManagedService, MigrationAwareService,
         TransactionalService, RemoteService, EventPublishingService<EventData, EntryListener>,
         PostJoinAwareService, SplitBrainHandlerService, ReplicationSupportingService {
@@ -425,12 +427,12 @@ public class MapService implements ManagedService, MigrationAwareService,
     }
 
     public void invalidateAllNearCaches(String mapName, Data key) {
-        InvalidateNearCacheOperation operation = new InvalidateNearCacheOperation(mapName, key);
         Collection<MemberImpl> members = nodeEngine.getClusterService().getMemberList();
         for (MemberImpl member : members) {
             try {
                 if (member.localMember())
                     continue;
+                InvalidateNearCacheOperation operation = new InvalidateNearCacheOperation(mapName, key);
                 Invocation invocation = nodeEngine.getOperationService().createInvocationBuilder(SERVICE_NAME, operation, member.getAddress()).build();
                 invocation.invoke();
             } catch (Throwable throwable) {
@@ -613,8 +615,9 @@ public class MapService implements ManagedService, MigrationAwareService,
             dataValue = dataValue != null ? dataValue : dataOldValue;
         }
         EventData event = new EventData(source, mapName, caller, dataKey, dataValue, dataOldValue, eventType.getType());
-        nodeEngine.getEventService().publishEvent(SERVICE_NAME, registrationsWithValue, event);
-        nodeEngine.getEventService().publishEvent(SERVICE_NAME, registrationsWithoutValue, event.cloneWithoutValues());
+        int orderKey = dataKey.hashCode();
+        nodeEngine.getEventService().publishEvent(SERVICE_NAME, registrationsWithValue, event, orderKey);
+        nodeEngine.getEventService().publishEvent(SERVICE_NAME, registrationsWithoutValue, event.cloneWithoutValues(), orderKey);
     }
 
     public String addLocalEventListener(EntryListener entryListener, String mapName) {

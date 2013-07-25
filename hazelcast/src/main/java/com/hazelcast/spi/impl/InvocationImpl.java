@@ -92,10 +92,6 @@ abstract class InvocationImpl implements Invocation, Callback<Object> {
         if (op.getCallId() != 0) {
             throw new IllegalStateException("An operation[" + op + "] can not be used for multiple invocations!");
         }
-        if (nodeEngine.operationService.isOperationThread()
-                && (op instanceof PartitionAwareOperation) && !OperationAccessor.isMigrationOperation(op)) {
-            throw new IllegalThreadStateException(Thread.currentThread() + " cannot make remote call: " + op);
-        }
         try {
             OperationAccessor.setCallTimeout(op, callTimeout);
             OperationAccessor.setCallerAddress(op, nodeEngine.getThisAddress());
@@ -103,6 +99,10 @@ abstract class InvocationImpl implements Invocation, Callback<Object> {
                     .setPartitionId(partitionId).setReplicaIndex(replicaIndex);
             if (op.getCallerUuid() == null) {
                 op.setCallerUuid(nodeEngine.getLocalMember().getUuid());
+            }
+            OperationAccessor.setAsync(op, callback != null);
+            if (!nodeEngine.operationService.isInvocationAllowedFromCurrentThread(op) && !OperationAccessor.isMigrationOperation(op)) {
+                throw new IllegalThreadStateException(Thread.currentThread() + " cannot make remote call: " + op);
             }
             doInvoke();
         } catch (Exception e) {
@@ -118,7 +118,12 @@ abstract class InvocationImpl implements Invocation, Callback<Object> {
     private void doInvoke() {
         if (!nodeEngine.isActive()) {
             remote = false;
-            throw new HazelcastInstanceNotActiveException();
+            if (callback == null) {
+                throw new HazelcastInstanceNotActiveException();
+            } else {
+                notify(new HazelcastInstanceNotActiveException());
+                return;
+            }
         }
         final Address invTarget = getTarget();
         target = invTarget;
@@ -155,13 +160,13 @@ abstract class InvocationImpl implements Invocation, Callback<Object> {
                     if (prevCallId != 0) {
                         operationService.deregisterRemoteCall(prevCallId);
                     }
-                    if (op instanceof BackupAwareOperation) {
+                    if (callback == null && op instanceof BackupAwareOperation) {
                         final long callId = operationService.newCallId();
                         registerBackups((BackupAwareOperation) op, callId);
                         OperationAccessor.setCallId(op, callId);
                     }
                     ResponseHandlerFactory.setLocalResponseHandler(op, this);
-                    if (op instanceof PartitionAwareOperation) {
+                    if (!nodeEngine.operationService.isAllowedToRunInCurrentThread(op)) {
                         operationService.executeOperation(op);
                     } else {
                         operationService.runOperation(op);
@@ -170,7 +175,7 @@ abstract class InvocationImpl implements Invocation, Callback<Object> {
                     remote = true;
                     final RemoteCall call = member != null ? new RemoteCall(member, this) : new RemoteCall(invTarget, this);
                     final long callId = operationService.registerRemoteCall(call);
-                    if (op instanceof BackupAwareOperation) {
+                    if (callback == null && op instanceof BackupAwareOperation) {
                         registerBackups((BackupAwareOperation) op, callId);
                     }
                     OperationAccessor.setCallId(op, callId);
@@ -245,6 +250,7 @@ abstract class InvocationImpl implements Invocation, Callback<Object> {
                         final Object realResponse;
                         if (response instanceof Response) {
                             final Response responseObj = (Response) response;
+                            // no need to deregister backup call, since backups are not registered for async invocations.
                             realResponse = responseObj.response;
                         } else if (response == NULL_RESPONSE) {
                             realResponse = null;
@@ -259,7 +265,7 @@ abstract class InvocationImpl implements Invocation, Callback<Object> {
             }
         }
 
-        class ScheduledInv implements Runnable {
+        private class ScheduledInv implements Runnable {
             public void run() {
                 doInvoke();
             }

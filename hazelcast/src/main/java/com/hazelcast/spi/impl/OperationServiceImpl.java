@@ -59,11 +59,11 @@ final class OperationServiceImpl implements OperationService {
     private final ILogger logger;
     private final AtomicLong callIdGen = new AtomicLong(0);
     private final ConcurrentMap<Long, RemoteCall> remoteCalls;
-    private final ExecutorService[] opExecutors;
-    private final ExecutorService systemExecutor;
+    private final ExecutorService[] operationExecutors;
+    private final ExecutorService defaultOperationExecutor;
     private final ExecutorService responseExecutor;
     private final long defaultCallTimeout;
-    private final Set<RemoteCallKey> executingCalls;
+    private final Map<RemoteCallKey, RemoteCallKey> executingCalls;
     private final ConcurrentMap<Long, Semaphore> backupCalls;
     private final int operationThreadCount;
     private final EntryTaskScheduler<Object, ScheduledBackup> backupScheduler;
@@ -79,14 +79,14 @@ final class OperationServiceImpl implements OperationService {
         remoteCalls = new ConcurrentHashMap<Long, RemoteCall>(1000, 0.75f, concurrencyLevel);
         final int opThreadCount = node.getGroupProperties().OPERATION_THREAD_COUNT.getInteger();
         operationThreadCount =  opThreadCount > 0 ? opThreadCount : coreSize * 2;
-        opExecutors = new ExecutorService[operationThreadCount];
-        for (int i = 0; i < opExecutors.length; i++) {
-            opExecutors[i] = Executors.newSingleThreadExecutor(new OperationThreadFactory(i));
+        operationExecutors = new ExecutorService[operationThreadCount];
+        for (int i = 0; i < operationExecutors.length; i++) {
+            operationExecutors[i] = Executors.newSingleThreadExecutor(new OperationThreadFactory(i));
         }
-        systemExecutor = nodeEngine.getExecutionService().getExecutor(ExecutionService.SYSTEM_EXECUTOR);
+        defaultOperationExecutor = nodeEngine.getExecutionService().getExecutor(ExecutionService.OPERATION_EXECUTOR);
         responseExecutor = Executors.newSingleThreadExecutor(new SingleExecutorThreadFactory(node.threadGroup,
                 node.getConfigClassLoader(), node.getThreadNamePrefix("response")));
-        executingCalls = Collections.newSetFromMap(new ConcurrentHashMap<RemoteCallKey, Boolean>(1000, 0.75f, concurrencyLevel));
+        executingCalls = new ConcurrentHashMap<RemoteCallKey, RemoteCallKey>(1000, 0.75f, concurrencyLevel);
         backupCalls = new ConcurrentHashMap<Long, Semaphore>(1000, 0.75f, concurrencyLevel);
         backupScheduler = EntryTaskSchedulerFactory.newScheduler(nodeEngine.getExecutionService().getScheduledExecutor(),
                 new ScheduledBackupProcessor(), false);
@@ -121,7 +121,7 @@ final class OperationServiceImpl implements OperationService {
     }
 
     private Executor getExecutor(int partitionId) {
-        return partitionId > -1 ? opExecutors[partitionId % operationThreadCount] : systemExecutor;
+        return partitionId > -1 ? operationExecutors[partitionId % operationThreadCount] : defaultOperationExecutor;
     }
 
     private int getPartitionIdForExecution(Operation op) {
@@ -133,22 +133,37 @@ final class OperationServiceImpl implements OperationService {
      * @param op
      */
     public void runOperation(Operation op) {
-        final int partitionId = getPartitionIdForExecution(op);
-        boolean runInCurrentThread = false;
-        if (partitionId < 0) {
-            runInCurrentThread = true;
+        if (isAllowedToRunInCurrentThread(op)) {
+            doRunOperation(op);
         } else {
+            throw new IllegalThreadStateException("Operation: " + op + " cannot be run in current thread! -> " + Thread.currentThread());
+        }
+    }
+
+    boolean isAllowedToRunInCurrentThread(Operation op) {
+        final int partitionId = getPartitionIdForExecution(op);
+        if (partitionId > -1) {
             final Thread currentThread = Thread.currentThread();
             if (currentThread instanceof OperationThread) {
                 int tid = ((OperationThread) currentThread).id;
-                runInCurrentThread = partitionId % operationThreadCount == tid;
+                return partitionId % operationThreadCount == tid;
             }
+            return false;
         }
-        if (runInCurrentThread) {
-            doRunOperation(op);
-        } else {
-            throw new IllegalThreadStateException("Operation: " + op + " cannot be run in current thread!");
+        return true;
+    }
+
+    boolean isInvocationAllowedFromCurrentThread(Operation op) {
+        final Thread currentThread = Thread.currentThread();
+        if (currentThread instanceof OperationThread) {
+            final int partitionId = getPartitionIdForExecution(op);
+            if (partitionId > -1) {
+                int tid = ((OperationThread) currentThread).id;
+                return partitionId % operationThreadCount == tid;
+            }
+            return true;
         }
+        return true;
     }
 
     /**
@@ -266,8 +281,9 @@ final class OperationServiceImpl implements OperationService {
         RemoteCallKey callKey = null;
         if (op.getCallId() != 0 && op.returnsResponse()) {
             callKey = new RemoteCallKey(op.getCallerAddress(), op.getCallId());
-            if (!executingCalls.add(callKey)) {
-                logger.log(Level.SEVERE, "Duplicate Call record! -> " + callKey + " == " + op.getClass().getName());
+            RemoteCallKey current;
+            if ((current = executingCalls.put(callKey, callKey)) != null) {
+                logger.log(Level.SEVERE, "Duplicate Call record! -> " + callKey + " / " + current + " == " + op.getClass().getName());
             }
         }
         return callKey;
@@ -275,7 +291,7 @@ final class OperationServiceImpl implements OperationService {
 
     private void afterCallExecution(Operation op, RemoteCallKey callKey) {
         if (callKey != null && op.getCallId() != 0 && op.returnsResponse()) {
-            if (!executingCalls.remove(callKey)) {
+            if (executingCalls.remove(callKey) == null) {
                 logger.log(Level.SEVERE, "No Call record has been found: -> " + callKey + " == " + op.getClass().getName());
             }
         }
@@ -293,7 +309,7 @@ final class OperationServiceImpl implements OperationService {
         int asyncBackupCount = (backupAwareOp.getAsyncBackupCount() > 0 && maxBackups > syncBackupCount)
                 ? Math.min(maxBackups - syncBackupCount, backupAwareOp.getAsyncBackupCount()) : 0;
 
-        if (!returnsResponse) {
+        if (!returnsResponse || op.isAsync()) {
             asyncBackupCount += syncBackupCount;
             syncBackupCount = 0;
         }
@@ -333,9 +349,8 @@ final class OperationServiceImpl implements OperationService {
 
     private void scheduleBackup(Operation op, Backup backup, int partitionId, int replicaIndex) {
         final RemoteCallKey key = new RemoteCallKey(op.getCallerAddress(), op.getCallId());
-        if (logger.isLoggable(Level.INFO)) {
-            // TODO: @mm - change log level to FINEST before final release!
-            logger.log(Level.INFO, "Scheduling -> " + backup);
+        if (logger.isLoggable(Level.FINEST)) {
+            logger.log(Level.FINEST, "Scheduling -> " + backup);
         }
         backupScheduler.schedule(500, key, new ScheduledBackup(backup, partitionId, replicaIndex));
     }
@@ -431,6 +446,10 @@ final class OperationServiceImpl implements OperationService {
 
     private Map<Integer, Object> invokeOnPartitions(String serviceName, OperationFactory operationFactory,
                                                     Map<Address, List<Integer>> memberPartitions) throws Exception {
+        final Thread currentThread = Thread.currentThread();
+        if (currentThread instanceof OperationThread) {
+            throw new IllegalThreadStateException(currentThread + " cannot make invocation on multiple partitions!");
+        }
         final Map<Address, Future> responses = new HashMap<Address, Future>(memberPartitions.size());
         for (Map.Entry<Address, List<Integer>> mp : memberPartitions.entrySet()) {
             final Address address = mp.getKey();
@@ -585,7 +604,7 @@ final class OperationServiceImpl implements OperationService {
 
     @PrivateApi
     boolean isOperationExecuting(Address caller, long operationCallId) {
-        return executingCalls.contains(new RemoteCallKey(caller, operationCallId));
+        return executingCalls.containsKey(new RemoteCallKey(caller, operationCallId));
     }
 
     void onMemberLeft(final MemberImpl member) {
@@ -599,13 +618,9 @@ final class OperationServiceImpl implements OperationService {
         }, 1111, TimeUnit.MILLISECONDS);
     }
 
-    boolean isOperationThread() {
-        return Thread.currentThread() instanceof OperationThread;
-    }
-
     void shutdown() {
         logger.log(Level.FINEST, "Stopping operation threads...");
-        for (ExecutorService executor : opExecutors) {
+        for (ExecutorService executor : operationExecutors) {
             executor.shutdown();
         }
         responseExecutor.shutdown();
@@ -616,7 +631,7 @@ final class OperationServiceImpl implements OperationService {
         remoteCalls.clear();
         backupCalls.clear();
         backupScheduler.cancelAll();
-        for (ExecutorService executor : opExecutors) {
+        for (ExecutorService executor : operationExecutors) {
             try {
                 executor.awaitTermination(3, TimeUnit.SECONDS);
             } catch (InterruptedException ignored) {
@@ -716,6 +731,7 @@ final class OperationServiceImpl implements OperationService {
     }
 
     private class RemoteCallKey {
+        private final long time = Clock.currentTimeMillis();
         private final Address caller;
         private final long callId;
 
@@ -747,6 +763,7 @@ final class OperationServiceImpl implements OperationService {
             sb.append("RemoteCallKey");
             sb.append("{caller=").append(caller);
             sb.append(", callId=").append(callId);
+            sb.append(", time=").append(time);
             sb.append('}');
             return sb.toString();
         }

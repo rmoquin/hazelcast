@@ -68,7 +68,8 @@ public final class ExecutionServiceImpl implements ExecutionService {
 
         final int coreSize = Runtime.getRuntime().availableProcessors();
         // default executors
-        register(SYSTEM_EXECUTOR, coreSize * 2, Integer.MAX_VALUE);
+        register(SYSTEM_EXECUTOR, coreSize, Integer.MAX_VALUE);
+        register(OPERATION_EXECUTOR, coreSize * 2, Integer.MAX_VALUE);
         register(ASYNC_EXECUTOR, coreSize * 10, coreSize * 10000);
         register(CLIENT_EXECUTOR, coreSize * 10, coreSize * 10000);
         scheduledManagedExecutor = register(SCHEDULED_EXECUTOR, coreSize * 5, coreSize * 10000);
@@ -142,6 +143,11 @@ public final class ExecutionServiceImpl implements ExecutionService {
         return new ScheduledTaskRunner(scheduledManagedExecutor, command);
     }
 
+    @PrivateApi
+    public Executor getCachedExecutor() {
+        return new ExecutorDelegate(cachedExecutorService);
+    }
+
     public ScheduledExecutorService getScheduledExecutor() {
         return new ScheduledExecutorServiceDelegate(scheduledExecutorService);
     }
@@ -166,6 +172,18 @@ public final class ExecutionServiceImpl implements ExecutionService {
         final ExecutorService ex = executors.remove(name);
         if (ex != null) {
             ex.shutdown();
+        }
+    }
+
+    private static class ExecutorDelegate implements Executor {
+        private final Executor executor;
+
+        private ExecutorDelegate(Executor executor) {
+            this.executor = executor;
+        }
+
+        public void execute(Runnable command) {
+            executor.execute(command);
         }
     }
 
