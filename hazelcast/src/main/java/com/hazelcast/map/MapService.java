@@ -245,7 +245,7 @@ public class MapService implements ManagedService, MigrationAwareService,
                 mergePolicy = ClassLoaderUtil.newInstance(nodeEngine.getConfigClassLoader(), mergePolicyName);
                 mergePolicyMap.put(mergePolicyName, mergePolicy);
             } catch (Exception e) {
-                logger.log(Level.SEVERE, e.getMessage(), e);
+                logger.severe(e);
                 throw ExceptionUtil.rethrow(e);
             }
         }
@@ -340,7 +340,10 @@ public class MapService implements ManagedService, MigrationAwareService,
                     if (event.getMigrationEndpoint() == MigrationEndpoint.SOURCE) {
                         indexService.removeEntryIndex(record.getKey());
                     } else {
-                        indexService.saveEntryIndex(new QueryEntry(getSerializationService(), record.getKey(), record.getKey(), record.getValue()));
+                        Object value = record.getValue();
+                        if (value != null) {
+                            indexService.saveEntryIndex(new QueryEntry(getSerializationService(), record.getKey(), record.getKey(), value));
+                        }
                     }
                 }
             }
@@ -458,7 +461,7 @@ public class MapService implements ManagedService, MigrationAwareService,
     }
 
     public void destroyDistributedObject(Object objectId) {
-        logger.log(Level.WARNING, "Destroying object: " + objectId);
+        logger.warning("Destroying object: " + objectId);
         final String name = String.valueOf(objectId);
         mapContainers.remove(name);
         final PartitionContainer[] containers = partitionContainers;
@@ -875,29 +878,24 @@ public class MapService implements ManagedService, MigrationAwareService,
         }
     }
 
-    public QueryableEntrySet getQueryableEntrySet(String mapName) {
-        List<Integer> memberPartitions = nodeEngine.getPartitionService().getMemberPartitions(nodeEngine.getThisAddress());
-        List<Map<Data, Record>> mlist = new ArrayList<Map<Data, Record>>();
-        for (Integer partition : memberPartitions) {
-            PartitionContainer container = getPartitionContainer(partition);
-            RecordStore recordStore = container.getRecordStore(mapName);
-            mlist.add(recordStore.getRecords());
-        }
-        return new QueryableEntrySet(nodeEngine.getSerializationService(), mlist);
-    }
-
-    public void queryOnPartition(String mapName, Predicate predicate, int partitionId, QueryResult result) {
+    public QueryResult queryOnPartition(String mapName, Predicate predicate, int partitionId) {
+        final QueryResult result = new QueryResult();
         PartitionContainer container = getPartitionContainer(partitionId);
         RecordStore recordStore = container.getRecordStore(mapName);
         Map<Data, Record> records = recordStore.getRecords();
         SerializationService serializationService = nodeEngine.getSerializationService();
         for (Record record : records.values()) {
             Data key = record.getKey();
-            QueryEntry queryEntry = new QueryEntry(serializationService, key, key, record.getValue());
+            Object value = record.getValue();
+            if (value == null) {
+                continue;
+            }
+            QueryEntry queryEntry = new QueryEntry(serializationService, key, key, value);
             if (predicate.apply(queryEntry)) {
                 result.add(new QueryResultEntryImpl(key, key, queryEntry.getValueData()));
             }
         }
+        return result;
     }
 
     public LocalMapStatsImpl createLocalMapStats(String mapName) {
@@ -960,7 +958,7 @@ public class MapService implements ManagedService, MigrationAwareService,
                             backupEntryMemoryCost += record.getCost();
                         }
                     } else if (replicaAddress == null && clusterService.getSize() > backupCount) {
-                        logger.log(Level.WARNING, "Partition: " + partition + ", replica: " + replica + " has no owner!");
+                        logger.warning("Partition: " + partition + ", replica: " + replica + " has no owner!");
                     }
                 }
             }
