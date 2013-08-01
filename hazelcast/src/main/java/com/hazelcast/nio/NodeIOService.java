@@ -84,9 +84,12 @@ public class NodeIOService implements IOService {
     }
 
     public void handleMemberPacket(final Packet packet) {
-        final MemberImpl member = node.clusterService.getMember(packet.getConn().getEndPoint());
-        if (member != null) {
-            member.didRead();
+        final Address endPoint = packet.getConn().getEndPoint();
+        if (endPoint != null) {
+            final MemberImpl member = node.clusterService.getMember(endPoint);
+            if (member != null) {
+                member.didRead();
+            }
         }
         nodeEngine.handlePacket(packet);
     }
@@ -188,9 +191,6 @@ public class NodeIOService implements IOService {
 
     public int getConnectionMonitorMaxFaults() {
         return node.groupProperties.CONNECTION_MONITOR_MAX_FAULTS.getInteger();
-    }
-
-    public void onShutdown() {
     }
 
     public void executeAsync(final Runnable runnable) {
